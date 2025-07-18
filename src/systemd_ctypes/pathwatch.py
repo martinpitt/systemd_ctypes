@@ -145,7 +145,9 @@ class WatchInvalidator:
         # This is a little bit tricky: systemd doesn't have a specific close
         # API outside of unref, so let's make it as explicit as possible.
         self._watch = None
-        self._source = None
+        if self._source is not None:
+            self._source.cancel()
+            self._source = None
 
 
 class PathStack(List[str]):
@@ -208,7 +210,9 @@ class PathWatch:
 
             if self._source or self._fd or self._errno != error.errno:
                 logger.debug('Ending existing watches.')
-                self._source = None
+                if self._source is not None:
+                    self._source.cancel()
+                    self._source = None
                 self._fd.close()
                 self._fd = Handle()
                 self._errno = error.errno
@@ -225,7 +229,9 @@ class PathWatch:
                 return
 
             logger.debug('This file is new for us.  Removing old watch.')
-            self._source = None
+            if self._source is not None:
+                self._source.cancel()
+                self._source = None
             self._fd.close()
             self._fd = fd.steal()
 
@@ -278,5 +284,7 @@ class PathWatch:
         for invalidator in self._invalidators:
             invalidator.close()
         self._invalidators = []
-        self._source = None
+        if self._source is not None:
+            self._source.cancel()
+            self._source = None
         self._fd.close()
