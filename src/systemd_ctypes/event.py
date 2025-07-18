@@ -95,15 +95,47 @@ class Selector(selectors.DefaultSelector):
         # dispatching.  This gets cleared again at the bottom, before return.
         libsystemd.Trampoline.deferred = []
 
-        while self.sd_event.prepare():
-            self.sd_event.dispatch()
+        # State-driven event processing to avoid EBUSY errors
+        while True:
+            try:
+                state = self.sd_event.get_state()
+                logger.debug('sd_event.get_state() returned %r', state)
+
+                if state == 0:  # SD_EVENT_INITIAL
+                    # Event loop is in initial state, call prepare()
+                    ret = self.sd_event.prepare()
+                    logger.debug('sd_event.prepare() returned %r', ret)
+                    if ret:
+                        # Events pending, but don't dispatch here - let it happen
+                        # in the next iteration when state will be PENDING
+                        continue
+                    else:
+                        # No events pending, break out to wait
+                        break
+                elif state == 1:  # SD_EVENT_PREPARING
+                    # An event source preparation handler is executing
+                    # This should be brief, break out to avoid infinite loop
+                    logger.debug('Event loop stuck in PREPARING state, breaking')
+                    break
+                elif state == 2:  # SD_EVENT_PENDING
+                    # Events are pending, dispatch them directly
+                    r = self.sd_event.dispatch()
+                    logger.debug('sd_event.dispatch() returned %r', r)
+                    # Continue loop to check if more events are pending
+                else:
+                    # Other states (ARMED, RUNNING, etc.) - break out
+                    logger.debug('Event loop in state %r, breaking', state)
+                    break
+            except OSError as e:
+                if e.errno == errno.EBUSY:
+                    # This can happen if we try to prepare() while a callback is
+                    # being dispatched.  Just wait for the next select() call.
+                    logger.debug('sd_event operation returned EBUSY, breaking')
+                    break
+                else:
+                    raise
+
         ready = super().select(timeout)
-        # workaround https://github.com/systemd/systemd/issues/23826
-        # keep calling wait() until there's nothing left
-        while self.sd_event.wait(0):
-            self.sd_event.dispatch()
-            while self.sd_event.prepare():
-                self.sd_event.dispatch()
 
         # We can be sure we're not dispatching callbacks anymore
         libsystemd.Trampoline.deferred = None
