@@ -16,6 +16,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import asyncio
+import errno
+import logging
 import selectors
 import sys
 from typing import Callable, ClassVar, Coroutine, List, Optional, Tuple
@@ -23,12 +25,16 @@ from typing import Callable, ClassVar, Coroutine, List, Optional, Tuple
 from . import inotify, libsystemd
 from .librarywrapper import Reference, UserData, byref
 
+logger = logging.getLogger(__name__)
+
 
 class Event(libsystemd.sd_event):
     class Source(libsystemd.sd_event_source):
         def cancel(self) -> None:
+            logger.debug('Cancelling event source %s (value=%s)', self, self.value)
             self._unref()
             self.value = None
+            logger.debug('Event source cancelled')
 
     _default_instance: ClassVar[Optional['Event']] = None
 
@@ -54,6 +60,7 @@ class Event(libsystemd.sd_event):
     def add_inotify(self, path: str, mask: inotify.Event, handler: InotifyHandler) -> InotifySource:
         source = Event.InotifySource(handler)
         self._add_inotify(byref(source), path, mask, source.trampoline, source.userdata)
+        logger.debug('Added inotify source for path %s with mask %s: %s', path, mask, source)
         return source
 
     def add_inotify_fd(self, fd: int, mask: inotify.Event, handler: InotifyHandler) -> InotifySource:

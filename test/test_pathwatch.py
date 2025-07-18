@@ -197,6 +197,32 @@ class TestPathWatch(unittest.TestCase):
         wait_event()
         listener.do_inotify_event.assert_called_once_with(Event.CLOSE_WRITE, 0, b'file.txt')
 
+    def test_close_parent_watch(self):
+        listener_top = MagicMock()
+        listener_sub = MagicMock()
+
+        watch_top = systemd_ctypes.PathWatch(self.base.name, listener_top)
+        watch_sub = systemd_ctypes.PathWatch(os.path.join(self.base.name, 'nonexisting'), listener_sub)
+
+        # wait for watches to be established
+        self.async_wait_cond(lambda: len(listener_top.mock_calls) == 1)
+        listener_top.do_identity_changed.assert_called_once()
+        self.async_wait_cond(lambda: len(listener_sub.mock_calls) == 1)
+        listener_sub.do_identity_changed.assert_called_once_with(None, errno.ENOENT)
+
+        # close the top watch; this creates cancelled inotify sources
+        watch_top.close()
+
+        # trigger fs event in top directory, on the cancelled inotify sources
+        with open(os.path.join(self.base.name, 'foo.txt'), 'w') as f:
+            f.write("test")
+
+        # no event should acutally be delivered to the API, as the top watch is closed
+        # but give it some time to process the event
+        systemd_ctypes.run_async(asyncio.sleep(1))
+
+        watch_sub.close()
+
 
 if __name__ == '__main__':
     unittest.main()
