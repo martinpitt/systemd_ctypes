@@ -27,6 +27,15 @@ from .librarywrapper import Reference, UserData, byref
 
 logger = logging.getLogger(__name__)
 
+# sd-event state constants from sd-event.h
+SD_EVENT_INITIAL = 0
+SD_EVENT_ARMED = 1
+SD_EVENT_PENDING = 2
+SD_EVENT_RUNNING = 3
+SD_EVENT_EXITING = 4
+SD_EVENT_FINISHED = 5
+SD_EVENT_PREPARING = 6
+
 
 class Event(libsystemd.sd_event):
     class Source(libsystemd.sd_event_source):
@@ -95,45 +104,51 @@ class Selector(selectors.DefaultSelector):
         # dispatching.  This gets cleared again at the bottom, before return.
         libsystemd.Trampoline.deferred = []
 
-        # State-driven event processing to avoid EBUSY errors
-        while True:
-            try:
-                state = self.sd_event.get_state()
-                logger.debug('sd_event.get_state() returned %r', state)
+        # see state machine at
+        # https://www.freedesktop.org/software/systemd/man/latest/sd_event_prepare.html
+        try:
+            state = self.sd_event.get_state()
+            logger.debug('sd_event.get_state() returned %r; timeout %r', state, timeout)
 
-                if state == 0:  # SD_EVENT_INITIAL
-                    # Event loop is in initial state, call prepare()
-                    ret = self.sd_event.prepare()
-                    logger.debug('sd_event.prepare() returned %r', ret)
-                    if ret:
-                        # Events pending, but don't dispatch here - let it happen
-                        # in the next iteration when state will be PENDING
-                        continue
-                    else:
-                        # No events pending, break out to wait
-                        break
-                elif state == 1:  # SD_EVENT_PREPARING
-                    # An event source preparation handler is executing
-                    # This should be brief, break out to avoid infinite loop
-                    logger.debug('Event loop stuck in PREPARING state, breaking')
-                    break
-                elif state == 2:  # SD_EVENT_PENDING
-                    # Events are pending, dispatch them directly
-                    r = self.sd_event.dispatch()
-                    logger.debug('sd_event.dispatch() returned %r', r)
-                    # Continue loop to check if more events are pending
+            if state == SD_EVENT_INITIAL:
+                ret = self.sd_event.prepare()
+                # >0: events are ready, process with dispatch(); 0: no events, → ARMED
+                logger.debug('sd_event.prepare() returned %r', ret)
+                if ret:
+                    # Events pending, but don't dispatch here - let it happen
+                    # in the next iteration when state will be PENDING
+                    # return []
+                    pass
                 else:
-                    # Other states (ARMED, RUNNING, etc.) - break out
-                    logger.debug('Event loop in state %r, breaking', state)
-                    break
-            except OSError as e:
-                if e.errno == errno.EBUSY:
-                    # This can happen if we try to prepare() while a callback is
-                    # being dispatched.  Just wait for the next select() call.
-                    logger.debug('sd_event operation returned EBUSY, breaking')
-                    break
-                else:
-                    raise
+                    # No events pending, break out to wait
+                    pass
+            elif state == SD_EVENT_ARMED:
+                # ret = self.sd_event.wait(int(0 if timeout is None else timeout * 1000000))
+                ret = self.sd_event.wait(int(0 if timeout is None else timeout * 1000000))
+                logger.debug('sd_event.wait() returned %r', state)
+                return []
+            elif state == SD_EVENT_PENDING:
+                r = self.sd_event.dispatch()
+                logger.debug('sd_event.dispatch() returned %r', r)
+                # Continue to check if more events are pending
+            elif state in [SD_EVENT_PREPARING, SD_EVENT_RUNNING, SD_EVENT_EXITING]:
+                # An event source preparation handler is executing; this should be brief
+                # return []
+                pass
+            elif state == SD_EVENT_FINISHED:
+                # Huh? but what can we do..
+                logger.warning('sd_event loop is finished')
+            else:
+                raise RuntimeError('Unexpected sd_event state: %r' % state)
+
+        except OSError:
+        #     if e.errno == errno.EBUSY:
+        #         # This can happen if we try to prepare() while a callback is
+        #         # being dispatched.  Just wait for the next select() call.
+        #         logger.debug('sd_event operation returned EBUSY, breaking')
+        #         break
+        #     else:
+            raise
 
         ready = super().select(timeout)
 
